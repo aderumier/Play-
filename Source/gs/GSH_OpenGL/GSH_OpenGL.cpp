@@ -796,7 +796,9 @@ void CGSH_OpenGL::SetupBlendingFunction(uint64 alphaReg)
 	else if((alpha.nA == ALPHABLEND_ABD_CD) && (alpha.nB == ALPHABLEND_ABD_CS) && (alpha.nC == ALPHABLEND_C_AD) && (alpha.nD == ALPHABLEND_ABD_CS))
 	{
 		//1010 -> Cs * (1 - Ad) + Cd * Ad
-		glBlendFuncSeparate(GL_ONE_MINUS_DST_ALPHA, GL_DST_ALPHA, GL_ONE, GL_ZERO);
+		//glBlendFuncSeparate(GL_ONE_MINUS_DST_ALPHA, GL_DST_ALPHA, GL_ONE, GL_ZERO);
+		// Workaround for TC3's grey haze.
+		glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ZERO);
 	}
 	else if((alpha.nA == ALPHABLEND_ABD_CD) && (alpha.nB == ALPHABLEND_ABD_CS) && (alpha.nC == ALPHABLEND_C_FIX) && (alpha.nD == ALPHABLEND_ABD_CS))
 	{
@@ -968,10 +970,12 @@ void CGSH_OpenGL::SetupFramebuffer(uint64 frameReg, uint64 zbufReg, uint64 sciss
 	auto scissor = make_convertible<SCISSOR>(scissorReg);
 	auto test = make_convertible<TEST>(testReg);
 
-	bool r = (frame.nMask & 0x000000FF) == 0;
-	bool g = (frame.nMask & 0x0000FF00) == 0;
-	bool b = (frame.nMask & 0x00FF0000) == 0;
-	bool a = (frame.nMask & 0xFF000000) == 0;
+	// Check if all bits are set. Stuff like capcoms fighting jam and tekkens test menu
+	// seem to set a single bit in red, which meant we were disabling the red channel completely
+	bool r = (frame.nMask & 0x000000FF) != 0xFF;
+	bool g = (frame.nMask & 0x0000FF00) != 0xFF00;
+	bool b = (frame.nMask & 0x00FF0000) != 0xFF0000;
+	bool a = (frame.nMask & 0xFF000000) != 0xFF000000;
 
 	//Don't write to alpha in PSMCT24
 	if(frame.nPsm == PSMCT24)
@@ -1232,7 +1236,7 @@ void CGSH_OpenGL::SetupTexture(uint64 primReg, uint64 tex0Reg, uint64 tex1Reg, u
 	m_renderState.texture0MagFilter = GL_NEAREST;
 	m_renderState.texture0WrapS = GL_CLAMP_TO_EDGE;
 	m_renderState.texture0WrapT = GL_CLAMP_TO_EDGE;
-	m_validGlState &= ~GLSTATE_TEXTURE;
+	m_validGlState &= ~(GLSTATE_TEXTURE_BIND | GLSTATE_TEXTURE_PARAMS);
 
 	auto prim = make_convertible<PRMODE>(primReg);
 
@@ -1657,6 +1661,21 @@ void CGSH_OpenGL::Prim_Sprite()
 
 			nT[0] = uv[0].GetV() / static_cast<float>(m_nTexHeight);
 			nT[1] = uv[1].GetV() / static_cast<float>(m_nTexHeight);
+
+			// Avoid half pixels causing black lines in Tekken.
+			float fractionalPart = nX2 - floor(nX2);
+			if(fractionalPart >= 0.4f && fractionalPart <= 0.6f)
+			{
+				nX2 += 0.5f;
+				nS[1] = (uv[1].GetU() + 0.5f) / static_cast<float>(m_nTexWidth);
+			}
+
+			fractionalPart = nY2 - floor(nY2);
+			if(fractionalPart >= 0.4f && fractionalPart <= 0.6f)
+			{
+				nY2 += 0.5f;
+				nT[1] = (uv[1].GetV() + 0.5f) / static_cast<float>(m_nTexHeight);
+			}
 		}
 		else
 		{
@@ -1677,6 +1696,11 @@ void CGSH_OpenGL::Prim_Sprite()
 			nT[1] = st[1].nT / nQ2;
 		}
 	}
+
+	nX1 = roundf(nX1);
+	nY1 = roundf(nY1);
+	nX2 = roundf(nX2);
+	nY2 = roundf(nY2);
 
 	auto color = MakeColor(
 	    rgbaq[1].nR, rgbaq[1].nG,
@@ -1778,24 +1802,34 @@ void CGSH_OpenGL::DoRenderPass()
 		m_validGlState |= GLSTATE_DEPTHMASK;
 	}
 
-	if((m_validGlState & GLSTATE_TEXTURE) == 0)
+	// Bind if handle changed; set params only if filters/wrap/special alphaIndex changed
+	bool needTextureBind = (m_validGlState & GLSTATE_TEXTURE_BIND) == 0;
+	bool needTextureParams = (m_validGlState & GLSTATE_TEXTURE_PARAMS) == 0;
+	if(needTextureBind || needTextureParams)
 	{
-		glActiveTexture(GL_TEXTURE0);
-		glBindTexture(GL_TEXTURE_2D, m_renderState.texture0Handle);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, m_renderState.texture0MinFilter);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, m_renderState.texture0MagFilter);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, m_renderState.texture0WrapS);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, m_renderState.texture0WrapT);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, m_renderState.texture0AlphaAsIndex ? GL_ALPHA : GL_RED);
-
-		glActiveTexture(GL_TEXTURE1);
-		glBindTexture(GL_TEXTURE_2D, m_renderState.texture1Handle);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-		m_validGlState |= GLSTATE_TEXTURE;
+		if(needTextureBind)
+		{
+			glActiveTexture(GL_TEXTURE0);
+			glBindTexture(GL_TEXTURE_2D, m_renderState.texture0Handle);
+			glActiveTexture(GL_TEXTURE1);
+			glBindTexture(GL_TEXTURE_2D, m_renderState.texture1Handle);
+			m_validGlState |= GLSTATE_TEXTURE_BIND;
+		}
+		if(needTextureParams)
+		{
+			glActiveTexture(GL_TEXTURE0);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, m_renderState.texture0MinFilter);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, m_renderState.texture0MagFilter);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, m_renderState.texture0WrapS);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, m_renderState.texture0WrapT);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, m_renderState.texture0AlphaAsIndex ? GL_ALPHA : GL_RED);
+			glActiveTexture(GL_TEXTURE1);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+			m_validGlState |= GLSTATE_TEXTURE_PARAMS;
+		}
 	}
 
 	if((m_validGlState & GLSTATE_FRAMEBUFFER) == 0)
@@ -2594,7 +2628,7 @@ void CGSH_OpenGL::CommitFramebufferDirtyPages(const FramebufferPtr& framebuffer,
 			texHeight = framebuffer->m_height - texY;
 		}
 
-		m_validGlState &= ~(GLSTATE_SCISSOR | GLSTATE_FRAMEBUFFER | GLSTATE_TEXTURE);
+		m_validGlState &= ~(GLSTATE_SCISSOR | GLSTATE_FRAMEBUFFER | GLSTATE_TEXTURE_BIND | GLSTATE_TEXTURE_PARAMS);
 		copyToFbEnabler.EnableCopyToFb(framebuffer, m_copyToFbTexture);
 
 		((this)->*(m_textureUpdater[framebuffer->m_psm]))(framebuffer->m_basePtr, framebuffer->m_width / 64,
