@@ -78,6 +78,27 @@ if(BUILD_PLAY)
 			add_subdirectory(Source/ui_js)
 		endif(TARGET_PLATFORM_JS)
 	endif()
+
+
+        # Enable Link-Time Optimization
+        include(CheckIPOSupported)
+        check_ipo_supported(RESULT supported OUTPUT error)
+
+        if(supported)
+            set_property(TARGET Play PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+            set_property(TARGET PlayCore PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+            message(STATUS "IPO/LTO enabled")
+        else()
+            message(STATUS "IPO/LTO not supported: <${error}>")
+        endif()
+
+        add_compile_options("-mavx2") #SIMD AVX2
+        add_compile_options("-ffast-math") # Fast floating point
+        add_compile_options("-O3") # Favor speed over size
+        add_compile_options("-fno-exceptions") # Optional: for performance, if safe
+        add_compile_options("-flto")          # Whole program optimization (Link Time Optimization)
+        add_compile_options("-funsafe-math-optimizations") # Allow aggressive FP optimizations
+
 endif(BUILD_PLAY)
 
 if(BUILD_TESTS)
